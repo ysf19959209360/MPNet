@@ -193,49 +193,43 @@ class FourierUnit(nn.Module):
         out = torch.fft.irfft2(Y, s=(H, W), norm=self.fft_norm)
         return out.permute(0,2,3,1).contiguous()
 
-class MLP(nn.Module):
-    def __init__(self, dim, expansion=2):
-        super().__init__()
-        in_channels = 3 * dim
-        hidden_channels = in_channels * expansion
-
-        self.norm = nn.BatchNorm2d(in_channels)
-
-        self.project_in = nn.Conv2d(in_channels, hidden_channels, 1, 1, 0, bias=False)
-        self.dwconv = nn.Conv2d(hidden_channels, hidden_channels, 3, 1, 1,
-                                groups=hidden_channels, bias=False)
-        self.act = nn.GELU()
-        self.project_out = nn.Conv2d(hidden_channels, in_channels, 1, 1, 0, bias=False)
-
-        self.res_scale = nn.Parameter(torch.ones(1))
-
-    def forward(self, x):
-        identity = x
-        x = self.norm(x)
-        x = self.project_in(x)
-        x = self.dwconv(x)
-        x = self.act(x)
-        x = self.project_out(x)
-        return identity + self.res_scale * x
-
 class WaveletUnit(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.dwt = DWT()
         self.iwt = IWT()
 
-        self.mlp = MLP(dim, expansion=2)
+        self.ll_refine = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, 1, bias=False)
+        )
+
+        self.high_refine = nn.Sequential(
+            nn.Conv2d(3 * dim, 3 * dim, 3, 1, 1, groups=3 * dim, bias=False),
+            nn.GELU(),
+            nn.Conv2d(3 * dim, 3 * dim, 1, bias=False)
+        )
+
+        self.high_gate = nn.Sequential(
+            nn.Conv2d(4 * dim, dim, 1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(dim, 3 * dim, 1, bias=True),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
-        x = x.permute(0, 3, 1, 2).contiguous()
+        x = x.permute(0,3,1,2).contiguous()
         LL, LH, HL, HH = self.dwt(x)
-
+        LL_out = LL + self.ll_refine(LL)
         high = torch.cat([LH, HL, HH], dim=1)
-        high_enh = self.mlp(high)
+        high_res = self.high_refine(high)
+        gate = self.high_gate(torch.cat([LL_out, LH, HL, HH], dim=1))
+        high_out = high + gate * high_res
+        LH_out, HL_out, HH_out = torch.chunk(high_out, 3, dim=1)
+        out = self.iwt(LL_out, LH_out, HL_out, HH_out)
+        return out.permute(0,2,3,1).contiguous()
 
-        LH_out, HL_out, HH_out = torch.chunk(high_enh, 3, dim=1)
-        out = self.iwt(LL, LH_out, HL_out, HH_out)
-        return out.permute(0, 2, 3, 1).contiguous()
 
 class MPGSA(nn.Module):
     def __init__(self, dim, dim_head=64, heads=8, dim_reduced=16):
