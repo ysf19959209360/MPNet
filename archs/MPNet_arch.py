@@ -199,13 +199,7 @@ class WaveletUnit(nn.Module):
         self.dwt = DWT()
         self.iwt = IWT()
 
-        self.ll_refine = nn.Sequential(
-            nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False),
-            nn.GELU(),
-            nn.Conv2d(dim, dim, 1, bias=False)
-        )
-
-        self.high_refine = nn.Sequential(
+        self.mlp = nn.Sequential(
             nn.Conv2d(3 * dim, 3 * dim, 3, 1, 1, groups=3 * dim, bias=False),
             nn.GELU(),
             nn.Conv2d(3 * dim, 3 * dim, 1, bias=False)
@@ -221,13 +215,10 @@ class WaveletUnit(nn.Module):
     def forward(self, x):
         x = x.permute(0,3,1,2).contiguous()
         LL, LH, HL, HH = self.dwt(x)
-        LL_out = LL + self.ll_refine(LL)
         high = torch.cat([LH, HL, HH], dim=1)
-        high_res = self.high_refine(high)
-        gate = self.high_gate(torch.cat([LL_out, LH, HL, HH], dim=1))
-        high_out = high + gate * high_res
+        high_enh = self.mlp(high)
         LH_out, HL_out, HH_out = torch.chunk(high_out, 3, dim=1)
-        out = self.iwt(LL_out, LH_out, HL_out, HH_out)
+        out = self.iwt(LL, LH_out, HL_out, HH_out)
         return out.permute(0,2,3,1).contiguous()
 
 
